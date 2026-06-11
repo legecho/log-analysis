@@ -53,6 +53,9 @@ def main():
     guid_index = layer2_guid.build_guid_index(data)
     graph = layer2_guid.traverse(data, guid_index, ioc_result.initial_guids)
 
+    # Layer 2.5: File落地回溯 — 扩展因文件系统关联而遗漏的上游进程
+    graph = layer2_guid.expand_by_file_landing(data, graph, guid_index)
+
     # Layer 3: Validation
     validation = layer3_validate.check(graph.nodes, graph.edges)
 

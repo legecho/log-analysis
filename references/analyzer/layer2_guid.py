@@ -1,5 +1,6 @@
 """Layer 2: GUID index building, iterative graph traversal, process tree construction."""
 
+import os
 from collections import defaultdict
 from dataclasses import dataclass, field
 
@@ -28,6 +29,7 @@ class GraphResult:
     root_processes: list = field(default_factory=list)
     traversal_depth: int = 0
     guid_count: int = 0
+    file_landing_chains: list = field(default_factory=list)
 
 
 def build_guid_index(data: list[dict]) -> dict[str, set[int]]:
@@ -106,6 +108,121 @@ def traverse(data: list[dict], guid_index: dict[str, set[int]], initial_guids: s
         root_processes=root_processes,
         traversal_depth=depth,
         guid_count=len(known_guids),
+    )
+
+
+def expand_by_file_landing(data: list[dict], graph: GraphResult,
+                           guid_index: dict[str, set[int]],
+                           max_extra_depth: int = 2) -> GraphResult:
+    """
+    Expand traversal by file落地 relationships.
+
+    After the main GUID traversal, some upstream processes (e.g. browser downloads)
+    are missed because the connection is through the filesystem, not parent-child GUIDs.
+
+    This function:
+    1. Collects all process paths from the current graph
+    2. Builds a file落地 index: file_name → creator process_guid
+    3. Matches collected paths against this index
+    4. Adds creator GUIDs and re-traverses
+    """
+    # Step 1: Collect all executable paths from current graph
+    collected_paths = set()
+    for guid, node in graph.nodes.items():
+        if node.path:
+            collected_paths.add(node.path.lower())
+        if node.name:
+            collected_paths.add(node.name.lower())
+
+    if not collected_paths:
+        return graph
+
+    # Step 2: Build file落地 index from raw data
+    # file_create/file_write events: file_name → set of creator process_guids
+    file_creator_index = defaultdict(set)  # file_basename_lower → {creator_guid}
+    file_full_index = defaultdict(set)     # file_full_path_lower → {creator_guid}
+
+    for record in data:
+        et = record.get('event_type', '')
+        if et not in ('file_create', 'file_write', 'browser_files'):
+            continue
+
+        file_name = record.get('file_name', '') or record.get('target_file_name', '') or ''
+        if not file_name:
+            continue
+
+        creator_guid = record.get('process_guid', '')
+        if not creator_guid:
+            continue
+
+        file_lower = file_name.lower()
+        file_full_index[file_lower].add(creator_guid)
+
+        # Also index by basename
+        basename = os.path.basename(file_lower).replace('/', '\\')
+        file_creator_index[basename].add(creator_guid)
+
+    # Step 3: Match collected paths against file落地 index
+    new_creator_guids = set()
+    file_landing_chains = []  # [(created_file, creator_guid, creator_process_name)]
+
+    for path in collected_paths:
+        basename = os.path.basename(path).replace('/', '\\')
+        creators = file_creator_index.get(basename, set()) | file_full_index.get(path, set())
+        for creator_guid in creators:
+            if creator_guid not in graph.nodes:
+                new_creator_guids.add(creator_guid)
+                file_landing_chains.append({
+                    'created_file': path,
+                    'creator_guid': creator_guid,
+                })
+
+    if not new_creator_guids:
+        return graph
+
+    # Step 4: Re-traverse with expanded GUIDs
+    known_guids = set(graph.nodes.keys()) | new_creator_guids
+    collected_indices = {record.get('_idx', 0) for record in graph.related_records}
+
+    for depth in range(1, max_extra_depth + 1):
+        new_indices = set()
+        for guid in known_guids:
+            if guid in guid_index:
+                new_indices.update(guid_index[guid])
+
+        fresh_indices = new_indices - collected_indices
+        if not fresh_indices:
+            break
+
+        collected_indices.update(fresh_indices)
+
+        new_guids = _extract_guids_from_records(data, fresh_indices) - known_guids
+        if not new_guids:
+            collected_indices -= fresh_indices
+            break
+
+        known_guids.update(new_guids)
+
+    # Rebuild
+    related_records = [data[idx] for idx in sorted(collected_indices)]
+    nodes, edges = _build_tree(related_records)
+    child_guids_set = {e[1] for e in edges}
+    root_processes = [guid for guid in nodes if guid not in child_guids_set]
+
+    # Enrich file_landing_chains with creator process name
+    for chain in file_landing_chains:
+        creator_node = nodes.get(chain['creator_guid'])
+        if creator_node:
+            chain['creator_process'] = creator_node.name
+
+    return GraphResult(
+        related_records=related_records,
+        nodes=nodes,
+        edges=edges,
+        root_processes=root_processes,
+        traversal_depth=graph.traversal_depth + depth,
+        guid_count=len(known_guids),
+        file_landing_chains=file_landing_chains,
     )
 
 

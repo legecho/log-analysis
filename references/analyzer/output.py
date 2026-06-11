@@ -25,6 +25,8 @@ def generate(stats: StatsResult, ioc_result: IocResult, graph: GraphResult,
 
     _print_summary(stats, ioc_result, graph, validation, fallback, detail_path, ioc_list)
     _save_detail_json(stats, ioc_result, graph, validation, fallback, detail_path)
+    summary_path = detail_path.replace('pre_', 'summary_')
+    _save_summary_json(stats, ioc_result, graph, validation, fallback, ioc_list, summary_path)
 
     return detail_path
 
@@ -112,6 +114,10 @@ def _print_summary(stats, ioc_result, graph, validation, fallback, detail_path, 
 
     # [DETAIL_FILE]
     print(f"[DETAIL_FILE] {detail_path}")
+
+    # [SUMMARY_FILE]
+    summary_path = detail_path.replace('pre_', 'summary_')
+    print(f"[SUMMARY_FILE] {summary_path}")
 
 
 def _print_tree(graph, validation):
@@ -529,3 +535,195 @@ def _save_detail_json(stats, ioc_result, graph, validation, fallback, detail_pat
 
     with open(detail_path, 'w', encoding='utf-8') as f:
         json.dump(detail, f, ensure_ascii=False, indent=2, default=str)
+
+
+# =============================================================================
+# Summary JSON: compressed output for AI first-pass reading (~3-7k tokens)
+# =============================================================================
+
+# High-information event types that must be preserved in full
+HIGH_INFO_EVENT_TYPES = {
+    'process_creation', 'DNS_Query', 'IP_Event', 'process_access',
+    'Process_Injection', 'user_logon', 'user_logoff', 'user_added',
+    'user_deleted', 'userpwd_changed', 'usergroup_changed',
+    'userinfo_changed', 'network_event', 'powershell', 'powershell_script',
+}
+
+# Low-information event types that get compressed to counts only
+LOW_INFO_EVENT_TYPES = {
+    'file_read', 'file_write', 'file_create', 'image_loaded',
+    'registry_set_value', 'registry_key_opened', 'pipe_create',
+    'pipe_connected', 'process_terminate', 'im_files',
+}
+
+
+def _save_summary_json(stats, ioc_result, graph, validation, fallback, ioc_list, summary_path):
+    """
+    Save compressed summary JSON for AI first-pass reading.
+    Contains all structural information (process tree, risks, IOC hits)
+    but compresses timeline to only high-info events.
+    Full data remains in pre_*.json for on-demand grep queries.
+    """
+
+    # --- Meta ---
+    meta = {
+        'total_records': stats.total_records,
+        'time_range': list(stats.time_range),
+        'hosts': stats.hosts,
+        'users': stats.users,
+        'event_type_dist': stats.event_type_dist,
+        'process_freq': stats.process_freq,
+        'low_freq_processes': stats.low_freq_processes,
+    }
+
+    # --- Process Tree (compact) ---
+    nodes_compact = {}
+    for guid, node in graph.nodes.items():
+        nodes_compact[guid] = {
+            'name': node.name,
+            'path': node.path,
+            'cmd': node.cmd[:200] if node.cmd else '',
+            'user': node.user,
+            'sign': node.sign,
+            'integrity': node.integrity,
+            'first_seen': node.first_seen,
+            'event_types': node.event_types,
+        }
+
+    process_tree = {
+        'nodes': nodes_compact,
+        'edges': [[src, dst, rel] for src, dst, rel in graph.edges],
+        'root_processes': graph.root_processes,
+    }
+
+    # --- IOC Hits (compact: no full record) ---
+    ioc_hits_compact = []
+    for hit in ioc_result.hits:
+        # Extract only key fields from the record
+        record = hit.record
+        compact_record = {}
+        for key in ('event_type', 'event_creation_date', 'process_name', 'process_guid',
+                     'process_parent_name', 'process_command_line', 'dst_ip_addr', 'dst_port',
+                     'dns_host_name', 'dns_query_results', 'file_name', 'access_type'):
+            if key in record and record[key]:
+                compact_record[key] = record[key]
+        ioc_hits_compact.append({
+            'record_index': hit.record_index,
+            'ioc': hit.ioc,
+            'hit_fields': hit.hit_fields,
+            'record': compact_record,
+        })
+
+    # --- Validation Results ---
+    validation_compact = [
+        {
+            'guid': f.guid,
+            'process_name': f.process_name,
+            'risk_type': f.risk_type,
+            'description': f.description,
+            'severity': f.severity,
+        }
+        for f in validation.findings
+    ]
+
+    # --- Timeline Compressed ---
+    # Only high-info events in full, low-info compressed to counts
+    all_records = sorted(graph.related_records, key=lambda r: r.get('event_creation_date', ''))
+
+    timeline_high_info = []
+    low_info_counts = Counter()  # (process_name, event_type) → count
+
+    for r in all_records:
+        et = r.get('event_type', '')
+        if et in HIGH_INFO_EVENT_TYPES:
+            # Keep high-info events but trim large fields
+            compact = {}
+            for key in ('event_creation_date', 'event_type', 'process_name', 'process_guid',
+                         'process_parent_name', 'process_command_line', 'process_path',
+                         'dst_ip_addr', 'dst_port', 'src_ip_addr', 'src_port',
+                         'dns_host_name', 'dns_query_results', 'dns_query_type',
+                         'access_type', 'target_process_name', 'target_process_guid',
+                         'file_name', 'file_path'):
+                if key in r and r[key]:
+                    val = r[key]
+                    if key == 'process_command_line' and isinstance(val, str) and len(val) > 200:
+                        val = val[:200] + '...'
+                    compact[key] = val
+            timeline_high_info.append(compact)
+        elif et:
+            pname = r.get('process_name', '?')
+            low_info_counts[(pname, et)] += 1
+
+    # Convert low_info_counts to a sorted list
+    low_info_summary = [
+        {'process': pname, 'event_type': et, 'count': count}
+        for (pname, et), count in low_info_counts.most_common(50)
+    ]
+
+    timeline_compressed = {
+        'high_info_events': timeline_high_info,
+        'low_info_summary': low_info_summary,
+        'total_events': len(all_records),
+        'high_info_count': len(timeline_high_info),
+        'low_info_count': len(all_records) - len(timeline_high_info),
+    }
+
+    # --- Network Summary ---
+    ip_connections = Counter()
+    dns_queries = {}
+    for r in all_records:
+        if r.get('event_type') == 'IP_Event':
+            guid = r.get('process_guid', '?')
+            dst = r.get('dst_ip_addr', '?')
+            port = r.get('dst_port', '?')
+            ip_connections[(guid, dst, port)] += 1
+        elif r.get('event_type') == 'DNS_Query':
+            guid = r.get('process_guid', '?')
+            domain = r.get('dns_host_name') or r.get('dns_query_name', '?')
+            result = r.get('dns_query_results', '?')
+            dns_queries[(guid, domain)] = result
+
+    network_summary = {
+        'ip_connections': [
+            {'process': graph.nodes[guid].name if guid in graph.nodes else '?',
+             'guid': guid, 'dst_ip': dst, 'dst_port': port, 'count': count}
+            for (guid, dst, port), count in ip_connections.most_common(30)
+        ],
+        'dns_queries': [
+            {'process': graph.nodes[guid].name if guid in graph.nodes else '?',
+             'guid': guid, 'domain': domain, 'result': result}
+            for (guid, domain), result in sorted(dns_queries.items())
+        ],
+    }
+
+    # --- Blind Spots ---
+    blind_spots = {
+        'unknown_events_count': len(fallback.unknown_events),
+        'broken_chains_count': len(fallback.broken_chains),
+        'broken_chains': fallback.broken_chains[:10],
+        'orphan_network_count': len(fallback.orphan_network),
+        'missing_event_types': fallback.missing_event_types,
+    }
+
+    # --- File Landing Chains (new from expand_by_file_landing) ---
+    file_landing = graph.file_landing_chains if graph.file_landing_chains else []
+
+    # --- New IOC Candidates ---
+    new_ioc_candidates = fallback.new_ioc_candidates
+
+    # --- Assemble summary ---
+    summary = {
+        'meta': meta,
+        'ioc_hits': ioc_hits_compact,
+        'process_tree': process_tree,
+        'timeline': timeline_compressed,
+        'network': network_summary,
+        'validation_results': validation_compact,
+        'blind_spots': blind_spots,
+        'file_landing_chains': file_landing,
+        'new_ioc_candidates': new_ioc_candidates,
+    }
+
+    # Save summary file
+    with open(summary_path, 'w', encoding='utf-8') as f:
+        json.dump(summary, f, ensure_ascii=False, indent=2, default=str)
