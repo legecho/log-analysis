@@ -25,7 +25,7 @@ import output
 def main():
     parser = argparse.ArgumentParser(description='EDR Log Preprocessor for AI Analysis')
     parser.add_argument('--file', required=True, help='Path to source JSON log file')
-    parser.add_argument('--ioc', required=True, help='Comma-separated IOC list')
+    parser.add_argument('--ioc', required=False, default='', help='Comma-separated IOC list (optional for auto-analysis)')
     args = parser.parse_args()
 
     # Validate input file
@@ -34,11 +34,7 @@ def main():
         sys.exit(1)
 
     # Parse IOC list
-    ioc_list = [ioc.strip() for ioc in args.ioc.split(',') if ioc.strip()]
-    if not ioc_list:
-        print("ERROR: No valid IOCs provided", file=sys.stderr)
-        sys.exit(1)
-
+    ioc_list = [ioc.strip() for ioc in args.ioc.split(',') if ioc.strip()] if args.ioc else []
     # Load data
     with open(args.file, 'r', encoding='utf-8') as f:
         data = json.load(f)

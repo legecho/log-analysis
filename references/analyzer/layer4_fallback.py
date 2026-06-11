@@ -10,6 +10,12 @@ SAFE_DOMAIN_SUFFIXES = (
     '.apple.com', '.icloud.com',
     '.github.com', '.githubusercontent.com',
     '.cloudflare.com', '.akamai.net', '.amazonaws.com',
+    '.azure.com', '.azureedge.net', '.windows.net',
+    '.cloudfront.net',
+    '.akamaized.net',
+    '.sentry.io',
+    '.vercel.app', '.vercel.com',
+    '.netlify.app', '.netlify.com',
 )
 
 KNOWN_CLEAN_MD5 = {

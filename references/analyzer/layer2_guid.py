@@ -83,6 +83,8 @@ def traverse(data: list[dict], guid_index: dict[str, set[int]], initial_guids: s
         # Extract new GUIDs from fresh records
         new_guids = _extract_guids_from_records(data, fresh_indices) - known_guids
         if not new_guids:
+            # Rollback: these indices produced no new GUIDs, remove them
+            collected_indices -= fresh_indices
             break
 
         known_guids.update(new_guids)

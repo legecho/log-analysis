@@ -24,6 +24,32 @@ NORMAL_SVCHOST_PARENTS = {'services.exe', 'wininit.exe'}
 LOLBINS = {'certutil.exe', 'mshta.exe', 'regsvr32.exe', 'rundll32.exe', 'bitsadmin.exe',
             'wmic.exe', 'cmstp.exe', 'msbuild.exe'}
 
+# Suspicious command-line patterns for LOLBins (only flag when these are present)
+LOLBIN_SUSPICIOUS_CMD = {
+    'certutil.exe':    [re.compile(r'-urlcache', re.I), re.compile(r'-split\s+-f', re.I),
+                        re.compile(r'-decode', re.I), re.compile(r'/cacls', re.I)],
+    'mshta.exe':       [re.compile(r'vbscript:', re.I), re.compile(r'javascript:', re.I),
+                        re.compile(r'http', re.I)],
+    'regsvr32.exe':    [re.compile(r'/i:\S+\s+scrobj', re.I), re.compile(r'/s\s+/n\s+/i:', re.I)],
+    'rundll32.exe':    [re.compile(r'url\.dll', re.I), re.compile(r'FileProtocolHandler', re.I),
+                        re.compile(r'javascript:', re.I), re.compile(r'\\AppData\\', re.I)],
+    'bitsadmin.exe':   [re.compile(r'/transfer', re.I), re.compile(r'/create', re.I),
+                        re.compile(r'/addfile', re.I)],
+    'wmic.exe':        [re.compile(r'process\s+call\s+create', re.I)],
+    'cmstp.exe':       [re.compile(r'/s', re.I)],
+    'msbuild.exe':     [re.compile(r'http', re.I), re.compile(r'/p:', re.I)],
+}
+
+KNOWN_SYSTEM_PROCESSES = {
+    'taskhost.exe', 'taskhostw.exe', 'conhost.exe', 'dllhost.exe',
+    'wuauclt.exe', 'spoolsv.exe', 'msiexec.exe', 'WmiPrvSE.exe',
+    'SearchIndexer.exe', 'SecurityHealthService.exe', 'NisSrv.exe',
+    'MsMpEng.exe', 'svchost.exe', 'lsass.exe', 'csrss.exe',
+    'smss.exe', 'services.exe', 'wininit.exe', 'winlogon.exe',
+    'dwm.exe', 'fontdrvhost.exe', 'sihost.exe', 'RuntimeBroker.exe',
+    'backgroundTaskHost.exe', 'compptc.exe', 'dasHost.exe',
+}
+
 ABNORMAL_PARENT_CHILD = {
     'cmd.exe':        {'winword.exe', 'excel.exe', 'powerpnt.exe', 'outlook.exe'},
     'powershell.exe': {'winword.exe', 'excel.exe', 'powerpnt.exe', 'outlook.exe'},
@@ -33,7 +59,9 @@ ABNORMAL_PARENT_CHILD = {
 
 ENCODED_CMD_PATTERNS = [
     re.compile(r'-e(nc|ncodedcommand)\s+', re.IGNORECASE),
-    re.compile(r'[A-Za-z0-9+/=]{40,}'),
+    # Only match Base64-like blocks: must contain + / and = padding, surrounded by word boundaries
+    # Avoids false positives on Windows paths and normal command lines
+    re.compile(r'(?<![A-Za-z0-9/\\])[A-Za-z0-9+]{40,}={1,2}(?![A-Za-z0-9+/=])'),
 ]
 
 
@@ -114,14 +142,27 @@ def check(nodes: dict, edges: list) -> ValidationResult:
                     ))
                     break
 
-        # 5. LOLBin detection
+        # 5. LOLBin detection (context-aware: only flag suspicious command patterns)
         if name_lower in LOLBINS:
-            findings.append(RiskFinding(
-                guid=guid, process_name=node.name,
-                risk_type='LOLBIN',
-                description=f'LOLBin executed: {cmd[:100]}' if cmd else f'LOLBin: {node.name}',
-                severity='MEDIUM',
-            ))
+            suspicious_patterns = LOLBIN_SUSPICIOUS_CMD.get(name_lower, [])
+            if suspicious_patterns and cmd:
+                for pattern in suspicious_patterns:
+                    if pattern.search(cmd):
+                        findings.append(RiskFinding(
+                            guid=guid, process_name=node.name,
+                            risk_type='LOLBIN',
+                            description=f'LOLBin with suspicious cmd: {cmd[:120]}',
+                            severity='HIGH',
+                        ))
+                        break
+            elif not suspicious_patterns:
+                # No pattern list defined — flag as LOW for manual review
+                findings.append(RiskFinding(
+                    guid=guid, process_name=node.name,
+                    risk_type='LOLBIN',
+                    description=f'LOLBin executed (no cmd pattern to judge): {node.name}',
+                    severity='LOW',
+                ))
 
         # 6. Abnormal parent-child relationship
         if guid in parent_map:
@@ -146,8 +187,7 @@ def check(nodes: dict, edges: list) -> ValidationResult:
 
         # 7. SYSTEM user on non-system process
         if node.user and 'system' in node.user.lower():
-            if name_lower not in SYSTEM_PATHS and name_lower not in {'taskhost.exe', 'taskhostw.exe',
-                'conhost.exe', 'dllhost.exe', 'wuauclt.exe', 'spoolsv.exe', 'msiexec.exe'}:
+            if name_lower not in SYSTEM_PATHS and name_lower not in KNOWN_SYSTEM_PROCESSES:
                 findings.append(RiskFinding(
                     guid=guid, process_name=node.name,
                     risk_type='SYSTEM_UNEXPECTED',

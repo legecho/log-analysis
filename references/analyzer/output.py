@@ -137,10 +137,6 @@ def _print_tree(graph, validation):
 
     # Collect all root-level GUIDs (roots + remaining unprinted)
     root_guids = list(graph.root_processes)
-    for guid in graph.nodes:
-        if guid not in set(root_guids):
-            # Will be handled as "remaining" root-level node
-            pass
     remaining_guids = [g for g in graph.nodes if g not in set(root_guids)]
     all_root_level = root_guids + remaining_guids
 
@@ -420,7 +416,6 @@ def _print_timeline_aggregated(records):
                 last_time = last_time.split('.')[0]
 
             # Count sub-types
-            from collections import Counter
             sub_types = Counter(rec.get('event_type', '?') for rec in records[i:j])
             sub_str = ', '.join(f'{et}:{c}' for et, c in sub_types.most_common(5))
             if len(sub_types) > 5:

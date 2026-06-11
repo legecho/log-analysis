@@ -53,6 +53,24 @@ def normalize_ioc(ioc: str) -> list[str]:
     return list(variants)
 
 
+def _match_ioc(variant: str, str_val: str) -> bool:
+    """Match IOC variant against field value with word-boundary awareness for short IOCs."""
+    if len(variant) < 4:
+        # Short IOC: match if it appears as a segment after splitting on common delimiters
+        # e.g., "cmd" matches "cmd.exe" or "C:\Windows\cmd.exe" but not "powershell -command foo"
+        import re as _re
+        segments = _re.split(r'[\s;,=<>"\'{}()\[\]|.]', str_val)
+        for seg in segments:
+            # Check segment or basename of path
+            if seg.lower() == variant.lower():
+                return True
+            basename = seg.replace('/', '\\').split('\\')[-1]
+            if basename.lower() == variant.lower():
+                return True
+        return False
+    return variant in str_val
+
+
 def search(data: list[dict], ioc_list: list[str]) -> IocResult:
     """
     Search all fields of all records for each IOC.
@@ -84,7 +102,7 @@ def search(data: list[dict], ioc_list: list[str]) -> IocResult:
 
             for fld, str_val in field_values.items():
                 for variant in variants:
-                    if variant in str_val:
+                    if _match_ioc(variant, str_val):
                         hit_fields.append(fld)
                         break
 
