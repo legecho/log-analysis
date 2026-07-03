@@ -1,0 +1,14 @@
+skill.md
+  h_d8c40bad91e164 75-86,272-280
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.26-trip",
+  "base_commit_sha": "58aa009f1f3bef7ab926d8a0a3b4fda786e9ac40",
+  "prompts": {},
+  "humans": {
+    "h_d8c40bad91e164": {
+      "author": "Jiale Yang （杨佳乐）(FU-技术中心) <jialey@trip.com>"
+    }
+  }
+}
