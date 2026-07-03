@@ -68,6 +68,7 @@ description: 是资深网络安全工程师工作模式，专精日志/告警分
 - 深信服 EDR 字段完整定义见 `reference/field_reference.md`，包含 52 个字段说明及示例值；时间字段注意 `timestamp`（UTC，ClickHouse 存储）与 `event_creation_date`（UTC，精确到毫秒）的区别
 
 **当用户提供线索时，工作流程：**
+0. **判断日志文件大小**，原始日志文件小于5M大小跳过analyzer 脚本，直接进行分析，原始日志大小大于5M则按照正常执行流程。
 1. **先运行 analyzer 脚本**进行数据整理（构建进程树、提取 IOC 相关事件、排序时间线）：
    ```bash
    python references/analyzer/run.py --file <原始日志.json> --ioc <线索1>,<线索2>,...
@@ -422,3 +423,7 @@ A：[AI 的回应]
 - 每条陈述有依据支撑，避免泛泛而谈
 
 ---
+
+**报告元数据**：
+- **分析日期**：自动生成，格式 `YYYY-MM-DD HH:MM`
+- **分析师 Skill**：`log-analysis`（日志分析）
