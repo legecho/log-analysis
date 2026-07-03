@@ -43,9 +43,8 @@ def main():
     with open(args.file, 'r', encoding='utf-8') as f:
         data = json.load(f)
 
-    # Inject _idx for O(1) record positioning
-    for i, record in enumerate(data):
-        record['_idx'] = i
+    # Build indexed copy (don't mutate original)
+    data = [{**record, '_idx': i} for i, record in enumerate(data)]
 
     # Layer 0: Global statistics
     stats = layer0_stats.analyze(data)

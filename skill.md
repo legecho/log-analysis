@@ -68,12 +68,22 @@ description: 是资深网络安全工程师工作模式，专精日志/告警分
 - 深信服 EDR 字段完整定义见 `reference/field_reference.md`，包含 52 个字段说明及示例值；时间字段注意 `timestamp`（UTC，ClickHouse 存储）与 `event_creation_date`（UTC，精确到毫秒）的区别
 
 **当用户提供线索时，工作流程：**
-0. **判断日志文件大小**，原始日志文件小于5M大小跳过analyzer 脚本，直接进行分析，原始日志大小大于5M则按照正常执行流程。
 1. **先运行 analyzer 脚本**进行数据整理（构建进程树、提取 IOC 相关事件、排序时间线）：
    ```bash
    python references/analyzer/run.py --file <原始日志.json> --ioc <线索1>,<线索2>,...
    ```
-   脚本生成 `pre_<原文件名>.json`（包含进程树结构 `process_tree`、完整时间线 `timeline_full`、IOC 命中记录 `ioc_hits` 等）
+   脚本生成 `pre_<原文件名>.json`，AI 读取后独立分析。
+
+   **pre_*.json 使用方法**：
+   - `ioc_hits[].record_index` → 原始日志行号。记录内容优先在 `timeline_full` 中按 `event_creation_date` 匹配，若不在 timeline 中则查看 `ioc_only_records`
+   - `process_tree.nodes` 的 guid → 在 `timeline_full` 中按 `process_guid` 筛选该进程的所有事件
+   - `blind_spots.orphan_network_outside_timeline` → 已内嵌完整记录，直接读取
+
+   **数据边界**：
+   - `timeline_full` 仅包含通过 GUID 图遍历关联到的记录（约占原始日志的 68~85%），与线索无关的记录不包含在内
+   - `process_tree.cross_host_edges` 记录了跨主机的父子关系，这些边未加入主边列表（避免跨主机误连），分析时需注意
+   - `meta.truncated=true` 表示图遍历被截断，部分关联事件可能缺失，必要时回原始日志补充
+   - 若 `ioc_hits` 为空且 `guidance` 存在，说明 IOC 完全未命中，需检查 IOC 值或直接搜索原始日志
 
 2. **AI 读取 `pre_*.json` 进行分析**（纯粹当做整理后的日志数据，独立推理判断）
 
@@ -259,11 +269,15 @@ description: 是资深网络安全工程师工作模式，专精日志/告警分
 出处：`event_type` + 行号/record_index + `process_name`
 `````
 
-**格式要求：**
-- 每条证据引用**精确来源**：原始日志行号（精确到行）或 `pre_*.json` 中的 `event_creation_date`（精确到毫秒）。禁止使用"~3655"这类模糊引用或只写文件名不带行号
-- JSON 字段突出关键值，不照抄整条记录
-- 注明出处（event_type、process_name）
-- 一条证据说明一个结论，避免堆砌
+**三条底线（违反 = 报告不合格）**：
+1. **来源必须精确**：原始日志行号或 `event_creation_date`（精确到毫秒），禁止"约""大约"
+2. **置信度必须用数字**：不允许"置信度上升""置信度较高"这种模糊表述
+3. **交叉验证必须全覆盖**：关键发现中的每条证据，在交叉验证表中必须有对应条目
+
+**分析深度要求**：
+- 遇到命令行、URL、脚本内容、注册表路径等结构化数据时，**深入拆解每个组成部分的安全含义**，而不是用一句话概括整体行为。分析深度决定了报告价值——概括式分析等同于没有分析
+- 遇到进程派生关系时，**追溯触发机制**（用户双击？命令行？计划任务？WMI？），而不是只记录"A 创建了 B"
+- 遇到网络行为时，**分析域名/URL 的语义**（TLD 是否可疑？路径含义？参数是否为标识符？），而不是只记录"访问了 X"
 
 ### 交叉验证（强制）
 

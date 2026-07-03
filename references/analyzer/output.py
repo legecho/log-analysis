@@ -45,14 +45,25 @@ def _print_summary(stats, ioc_result, graph, validation, fallback, detail_path, 
     print()
 
     # [IOC_HITS]
-    for ioc in ioc_list:
-        if ioc in ioc_result.hit_summary:
-            field_counts = ioc_result.hit_summary[ioc]
-            total = sum(field_counts.values())
-            fields_str = ', '.join(f'{f}:{c}' for f, c in sorted(field_counts.items(), key=lambda x: -x[1]))
-            print(f'[IOC_HITS] "{ioc}" -> {total} hits ({fields_str})')
-        else:
-            print(f'[IOC_HITS] "{ioc}" -> 0 hits')
+    total_hits = len(ioc_result.hits)
+    if total_hits == 0:
+        print('[IOC_HITS] No records matched the provided IOCs.')
+        print('  Guidance: verify IOC values, search original log with grep, or try broader IOCs.')
+    else:
+        for ioc in ioc_list:
+            if ioc in ioc_result.hit_summary:
+                field_counts = ioc_result.hit_summary[ioc]
+                total = sum(field_counts.values())
+                fields_str = ', '.join(f'{f}:{c}' for f, c in sorted(field_counts.items(), key=lambda x: -x[1]))
+                print(f'[IOC_HITS] "{ioc}" -> {total} hits ({fields_str})')
+            else:
+                print(f'[IOC_HITS] "{ioc}" -> 0 hits')
+        # Count IOC-hit records not in timeline
+        timeline_indices = {r.get('_idx', -1) for r in graph.related_records}
+        ioc_hit_indices = set(h.record_index for h in ioc_result.hits)
+        ioc_only_count = len(ioc_hit_indices - timeline_indices)
+        if ioc_only_count > 0:
+            print(f'[IOC_HITS] {ioc_only_count} hit records NOT in timeline (included in ioc_only_records)')
     print()
 
     # [PROCESS_TREE]
@@ -78,6 +89,20 @@ def _print_summary(stats, ioc_result, graph, validation, fallback, detail_path, 
     print("[TIMELINE]")
     _print_timeline_layered(graph, validation, ioc_result)
     print()
+
+    # [CROSS_HOST]
+    if graph.cross_host_edges:
+        print("[CROSS_HOST] ⚠ Cross-host edges detected (NOT added to process_tree):")
+        for che in graph.cross_host_edges[:10]:
+            print(f"    {che['child_name']} on {che['child_host']} -> parent guid {che['parent_guid']} on {che['parent_hosts']}")
+        if len(graph.cross_host_edges) > 10:
+            print(f"    ... and {len(graph.cross_host_edges) - 10} more")
+        print()
+
+    # [TRUNCATED]
+    if graph.truncated:
+        print(f"[TRUNCATED] ⚠ Graph traversal hit record limit ({len(graph.related_records)} records). Some related events may be missing.")
+        print()
 
     # [BLIND_SPOTS]
     has_blind_spots = (fallback.unknown_events or fallback.broken_chains
@@ -485,6 +510,62 @@ def _save_detail_json(stats, ioc_result, graph, validation, fallback, detail_pat
             'event_types': node.event_types,
         }
 
+    # --- IOC hits: deduplicate by record_index, drop embedded record ---
+    ioc_dedup = {}  # record_index → {'ioc_list': set, 'hit_fields': set, 'record': dict}
+    for hit in ioc_result.hits:
+        idx = hit.record_index
+        if idx not in ioc_dedup:
+            ioc_dedup[idx] = {'ioc_list': set(), 'hit_fields': set(), 'record': hit.record}
+        ioc_dedup[idx]['ioc_list'].add(hit.ioc)
+        ioc_dedup[idx]['hit_fields'].update(hit.hit_fields)
+
+    ioc_hits_compact = [
+        {
+            'record_index': idx,
+            'ioc_list': sorted(entry['ioc_list']),
+            'hit_fields': sorted(entry['hit_fields']),
+        }
+        for idx, entry in ioc_dedup.items()
+    ]
+
+    # --- timeline_full: sort by time, strip _idx ---
+    timeline_sorted = sorted(graph.related_records, key=lambda r: r.get('event_creation_date', ''))
+    timeline_clean = [{k: v for k, v in r.items() if k != '_idx'} for r in timeline_sorted]
+
+    # --- ioc_only_records: IOC-hit records NOT in timeline_full ---
+    timeline_indices = {r.get('_idx', -1) for r in graph.related_records}
+    ioc_only = [
+        {k: v for k, v in entry['record'].items() if k != '_idx'}
+        for idx, entry in ioc_dedup.items()
+        if idx not in timeline_indices
+    ]
+
+    # --- blind_spots: keep only orphan records NOT in timeline_full ---
+    orphan_true = [r for r in fallback.orphan_network if r.get('_idx', -1) not in timeline_indices]
+
+    blind_spots = {
+        'unknown_event_count': len(fallback.unknown_events),
+        'broken_chains': fallback.broken_chains,
+        'orphan_network_total': len(fallback.orphan_network),
+        'orphan_network_outside_timeline': [
+            {k: v for k, v in r.items() if k != '_idx'}
+            for r in orphan_true
+        ],
+        'orphan_network_count': len(orphan_true),
+        'missing_event_types': fallback.missing_event_types,
+    }
+
+    # --- Zero IOC hit guidance ---
+    zero_hit_guidance = None
+    if not ioc_result.hits:
+        zero_hit_guidance = (
+            'No records matched the provided IOCs. '
+            'The output contains only global stats, process tree, and validation results. '
+            'Consider: (1) verify IOC values are correct, '
+            '(2) search the original log directly with grep, '
+            '(3) try broader or alternative IOC values.'
+        )
+
     detail = {
         'meta': {
             'total_records': stats.total_records,
@@ -494,25 +575,18 @@ def _save_detail_json(stats, ioc_result, graph, validation, fallback, detail_pat
             'event_type_dist': stats.event_type_dist,
             'process_freq': stats.process_freq,
             'low_freq_processes': stats.low_freq_processes,
+            'truncated': graph.truncated,
+            'cross_host_edge_count': len(graph.cross_host_edges),
         },
-        'ioc_hits': [
-            {
-                'record_index': hit.record_index,
-                'ioc': hit.ioc,
-                'hit_fields': hit.hit_fields,
-                'record': hit.record,
-            }
-            for hit in ioc_result.hits
-        ],
+        'ioc_hits': ioc_hits_compact,
+        'ioc_only_records': ioc_only,
         'process_tree': {
             'nodes': nodes_serial,
             'edges': [[src, dst, rel] for src, dst, rel in graph.edges],
             'root_processes': graph.root_processes,
+            'cross_host_edges': graph.cross_host_edges,
         },
-        'timeline_full': sorted(
-            graph.related_records,
-            key=lambda r: r.get('event_creation_date', '')
-        ),
+        'timeline_full': timeline_clean,
         'validation_results': [
             {
                 'guid': f.guid,
@@ -523,14 +597,12 @@ def _save_detail_json(stats, ioc_result, graph, validation, fallback, detail_pat
             }
             for f in validation.findings
         ],
-        'blind_spots': {
-            'unknown_events': fallback.unknown_events,
-            'broken_chains': fallback.broken_chains,
-            'orphan_network': fallback.orphan_network,
-            'missing_event_types': fallback.missing_event_types,
-        },
+        'blind_spots': blind_spots,
         'new_ioc_candidates': fallback.new_ioc_candidates,
     }
+
+    if zero_hit_guidance:
+        detail['guidance'] = zero_hit_guidance
 
     with open(detail_path, 'w', encoding='utf-8') as f:
         json.dump(detail, f, ensure_ascii=False, indent=2, default=str)
